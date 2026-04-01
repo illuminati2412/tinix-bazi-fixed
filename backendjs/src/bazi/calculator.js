@@ -1,6 +1,20 @@
 /**
  * BaZi Calculator - Core calculation module
  * Converted from Python bazi/calculator.py
+ *
+ * FIX: Dùng đúng lịch tiết khí (節氣曆) cho tứ trụ.
+ *
+ * lunar-javascript tính năm trụ và tháng trụ đúng theo tiết khí,
+ * nhưng BẮT BUỘC phải truyền đủ giờ phút vào Solar.fromYmdHms().
+ * Nếu chỉ dùng Solar.fromYmd() thì mặc định 0h → sai với người sinh
+ * đúng ngày tiết khí nhưng sau giờ tiết bắt đầu.
+ *
+ * Các bug đã sửa:
+ *  1. Khi isSolar=false: dùng Lunar.fromYmdHms thay vì Lunar.fromYmd
+ *     để giữ nguyên giờ sinh trước khi chuyển sang Solar.
+ *  2. Lấy tiết khí hiện hành (currentJieQi) từ bảng tiết khí năm,
+ *     thay vì dùng lunar.getJieQi() chỉ trả về giá trị khi đúng ngày tiết.
+ *  3. zhiShen3 trong _buildContext: nhất quán dùng Chinese can khi gọi getThapThan.
  */
 
 const { Solar, Lunar } = require('lunar-javascript');
@@ -28,19 +42,23 @@ class BaZiCalculator {
      * Calculate BaZi chart
      */
     calculate() {
-        // Convert to Solar if input is Lunar
+        // FIX 1: Luôn giữ giờ phút khi chuyển đổi âm/dương lịch.
+        // lunar-javascript dùng giờ để xác định đúng tiết khí (năm trụ và tháng trụ
+        // đổi đúng giờ tiết bắt đầu, không phải đổi vào 0h của ngày đó).
         let solar;
         if (this.isSolar) {
             solar = Solar.fromYmdHms(this.year, this.month, this.day, this.hour, this.minute, 0);
         } else {
-            const lunar = Lunar.fromYmd(this.year, this.month, this.day);
-            solar = lunar.getSolar();
+            // Lunar.fromYmdHms giữ nguyên giờ sinh → getSolar() trả về Solar đúng giờ
+            const lunarInput = Lunar.fromYmdHms(this.year, this.month, this.day, this.hour, this.minute, 0);
+            solar = lunarInput.getSolar();
         }
 
+        // Lấy lunar object từ Solar có đủ giờ để getEightChar() dùng tiết khí đúng
         const lunar = solar.getLunar();
         const bazi = lunar.getEightChar();
 
-        // Get Gans (Heavenly Stems)
+        // Get Gans (Heavenly Stems) — thư viện trả về Chinese chars
         this.gans = [
             bazi.getYearGan(),
             bazi.getMonthGan(),
@@ -48,7 +66,7 @@ class BaZiCalculator {
             bazi.getTimeGan()
         ];
 
-        // Get Zhis (Earthly Branches)
+        // Get Zhis (Earthly Branches) — thư viện trả về Chinese chars
         this.zhis = [
             bazi.getYearZhi(),
             bazi.getMonthZhi(),
@@ -73,19 +91,20 @@ class BaZiCalculator {
      * Build four pillars with details
      */
     _buildPillars() {
-        const pillarNames = ['Nam', 'Tháng', 'Ngày', 'Giờ'];
+        const pillarNames = ['Năm', 'Tháng', 'Ngày', 'Giờ'];
         const pillars = [];
 
         for (let i = 0; i < 4; i++) {
-            const gan = this.gans[i];
-            const zhi = this.zhis[i];
+            const gan = this.gans[i];   // Chinese char, e.g. '甲'
+            const zhi = this.zhis[i];   // Chinese char, e.g. '寅'
             const ganVN = ganzhi.ganToVN(gan);
             const zhiVN = ganzhi.zhiToVN(zhi);
 
             // Build tang_can with calculated thap_than
+            // TANG_CAN keys là Chinese zhi, values can là Vietnamese names
             const rawTangCan = ganzhi.getTangCan(zhi);
             const tangCanWithThapThan = rawTangCan.map(tc => {
-                // Convert Vietnamese can name back to Chinese for thap_than calculation
+                // tc.can là Vietnamese (e.g. 'Giáp') → convert về Chinese để gọi getThapThan nhất quán
                 const canVN = tc.can;
                 const canCN = ganzhi.GANS[ganzhi.GANS_VN.indexOf(canVN)] || '';
                 return {
@@ -174,17 +193,10 @@ class BaZiCalculator {
             }
         }
 
-        // Find the Gans that represent Tỷ, Kiếp, Kiêu, Ấn
-        // Need to calculate using ten_deities logic
-        const dayElement = ganzhi.ganToElement(dayGan);
-        const dayYin = ganzhi.GANS.indexOf(dayGan) % 2; // 0 = yang, 1 = yin
-
-        let strongScore = 0;
-
         // Calculate strong score = Tỷ + Kiếp + Kiêu + Ấn
+        let strongScore = 0;
         for (const gan of ganzhi.GANS) {
             const thapThan = ganzhi.getThapThan(dayGan, gan);
-            // Tỷ, Kiếp (same element), Kiêu, Ấn (generates me)
             if (['Tỷ', 'Kiếp', 'Kiêu', 'Ấn'].includes(thapThan)) {
                 strongScore += ganScores[gan] || 0;
             }
@@ -200,7 +212,6 @@ class BaZiCalculator {
         for (const zhi of this.zhis) {
             const status = ganzhi.getVongTrangSinh(dayGan, zhi);
             meStatus.push(status);
-            // Check if Day Master implies strength phases
             if (['Tr.Sinh', 'Đ.Vượng', 'L.Quan'].includes(status)) {
                 isWeak = false;
             }
@@ -208,7 +219,6 @@ class BaZiCalculator {
 
         // Additional check: if still weak, check if Tỷ count + Mộ count > 2
         if (isWeak) {
-            // Calculate shens similar to Python: stem deities + branch main deities
             const ganShens = this.gans.map((g, i) => i === 2 ? '' : ganzhi.getThapThan(dayGan, g));
             const zhiMainShens = this.zhis.map(z => ganzhi.getThapThan(dayGan, ganzhi.getZhiMainGan(z)));
             const allShens = [...ganShens, ...zhiMainShens];
@@ -237,15 +247,77 @@ class BaZiCalculator {
      */
     _calculateTemperature() {
         let temp = 0;
-
-        // Hot elements: Hỏa, Mộc
-        // Cold elements: Thủy, Kim
         temp += (this.elements['Hỏa'] || 0) * 1;
         temp += (this.elements['Mộc'] || 0) * 0.5;
         temp -= (this.elements['Thủy'] || 0) * 1;
         temp -= (this.elements['Kim'] || 0) * 0.5;
-
         return Math.round(temp * 10) / 10;
+    }
+
+    /**
+     * FIX 2: Lấy tiết khí đang áp dụng cho ngày sinh (tiết hiện hành),
+     * không dùng lunar.getJieQi() vì nó chỉ có giá trị khi đúng ngày tiết.
+     *
+     * Tra bảng JieQiTable của năm, tìm tiết gần nhất đã qua tính đến
+     * giờ sinh → đây là tiết đang áp dụng (tiết tháng trụ đang dùng).
+     *
+     * @param {Solar} solar - Solar object có đủ giờ phút
+     * @returns {string} Tên tiết khí hiện hành (Vietnamese)
+     */
+    _getCurrentJieQi(solar) {
+        // Map Chinese jieqi names → Vietnamese (chỉ 12 tiết dùng cho tháng trụ)
+        const JIEQI_VN = {
+            '立春': 'Lập Xuân',   '惊蛰': 'Kinh Trập',  '清明': 'Thanh Minh',
+            '立夏': 'Lập Hạ',     '芒种': 'Mang Chủng',  '小暑': 'Tiểu Thử',
+            '立秋': 'Lập Thu',    '白露': 'Bạch Lộ',     '寒露': 'Hàn Lộ',
+            '立冬': 'Lập Đông',   '大雪': 'Đại Tuyết',   '小寒': 'Tiểu Hàn',
+            // 12 trung khí (cần để hiển thị đầy đủ)
+            '雨水': 'Vũ Thủy',    '春分': 'Xuân Phân',   '谷雨': 'Cốc Vũ',
+            '小满': 'Tiểu Mãn',   '夏至': 'Hạ Chí',      '大暑': 'Đại Thử',
+            '处暑': 'Xử Thử',     '秋分': 'Thu Phân',    '霜降': 'Sương Giáng',
+            '小雪': 'Tiểu Tuyết', '冬至': 'Đông Chí',    '大寒': 'Đại Hàn',
+        };
+        // Các key dạng SNAKE_CASE trong lunar-javascript (một số tiết dùng cả hai cách)
+        const JIEQI_SNAKE_VN = {
+            'LI_CHUN': 'Lập Xuân',  'JING_ZHE': 'Kinh Trập', 'QING_MING': 'Thanh Minh',
+            'LI_XIA': 'Lập Hạ',    'MANG_ZHONG': 'Mang Chủng','XIAO_SHU': 'Tiểu Thử',
+            'LI_QIU': 'Lập Thu',   'BAI_LU': 'Bạch Lộ',      'HAN_LU': 'Hàn Lộ',
+            'LI_DONG': 'Lập Đông', 'DA_XUE': 'Đại Tuyết',    'XIAO_HAN': 'Tiểu Hàn',
+            'YU_SHUI': 'Vũ Thủy',  'CHUN_FEN': 'Xuân Phân',  'GU_YU': 'Cốc Vũ',
+            'XIAO_MAN': 'Tiểu Mãn','XIA_ZHI': 'Hạ Chí',      'DA_SHU': 'Đại Thử',
+            'CHU_SHU': 'Xử Thử',   'QIU_FEN': 'Thu Phân',    'SHUANG_JIANG': 'Sương Giáng',
+            'XIAO_XUE': 'Tiểu Tuyết','DONG_ZHI': 'Đông Chí', 'DA_HAN': 'Đại Hàn',
+        };
+
+        try {
+            const tbl = solar.getLunar().getJieQiTable();
+            if (!tbl) return '';
+
+            // Giờ sinh tính bằng milliseconds (UTC-agnostic, chỉ cần so sánh tương đối)
+            const birthMs = Date.UTC(solar.getYear(), solar.getMonth() - 1, solar.getDay(),
+                                     solar.getHour(), solar.getMinute(), solar.getSecond());
+
+            let latestJieQiVN = '';
+            let latestMs = -Infinity;
+
+            for (const [key, val] of Object.entries(tbl)) {
+                // val._p = { year, month, day, hour, minute, second }
+                const p = val._p || val;
+                if (!p || p.year === undefined) continue;
+
+                const jieQiMs = Date.UTC(p.year, p.month - 1, p.day, p.hour || 0, p.minute || 0, p.second || 0);
+
+                // Tìm tiết gần nhất đã qua (≤ giờ sinh)
+                if (jieQiMs <= birthMs && jieQiMs > latestMs) {
+                    latestMs = jieQiMs;
+                    latestJieQiVN = JIEQI_VN[key] || JIEQI_SNAKE_VN[key] || key;
+                }
+            }
+
+            return latestJieQiVN;
+        } catch (e) {
+            return '';
+        }
     }
 
     /**
@@ -259,11 +331,20 @@ class BaZiCalculator {
         // Calculate specialized shishen lists for analyze modules
         const ganShens = this.gans.map((g, i) => i === 2 ? 'Nhật Chủ' : ganzhi.getThapThan(dayGan, g));
         const zhiShens = this.zhis.map(z => ganzhi.getThapThan(dayGan, ganzhi.getZhiMainGan(z)));
-        const zhiShen3 = this.zhis.map(z => ganzhi.getTangCan(z).map(t => ganzhi.getThapThan(dayGan, t.can)));
+
+        // FIX 3: zhiShen3 - getTangCan trả về VN names, convert về Chinese trước khi getThapThan
+        const zhiShen3 = this.zhis.map(z =>
+            ganzhi.getTangCan(z).map(t => {
+                const canCN = ganzhi.GANS[ganzhi.GANS_VN.indexOf(t.can)] || t.can;
+                return ganzhi.getThapThan(dayGan, canCN);
+            })
+        );
 
         // Flattened list of all shens in the chart
         const shens2 = [...ganShens.filter(s => s !== 'Nhật Chủ'), ...zhiShen3.flat()];
 
+        // FIX 2: Lấy tiết khí hiện hành đúng cách
+        const tietKhi = this._getCurrentJieQi(solar);
 
         // Use lunar-javascript API for proper calculations
         let menhCung = '';
@@ -275,56 +356,40 @@ class BaZiCalculator {
         // Helper to translate Chinese GanZhi to Vietnamese
         const translateGanZhi = (str) => {
             if (!str) return '';
-            // Split GanZhi into Gan and Zhi (2 characters each in Chinese)
             if (str.length === 2) {
                 const gan = str[0];
                 const zhi = str[1];
                 return `${ganzhi.ganToVN(gan)} ${ganzhi.zhiToVN(zhi)}`;
             }
-            // If already in Vietnamese format (with space)
             if (str.includes(' ')) return str;
             return str;
         };
 
         try {
-            // Mệnh Cung from lunar-javascript
             const rawMenhCung = bazi.getMingGong ? bazi.getMingGong() : null;
             menhCung = rawMenhCung ? translateGanZhi(rawMenhCung) : `${dayGanVN} ${monthZhiVN}`;
 
-            // Thai Nguyên from lunar-javascript  
             const rawThaiNguyen = bazi.getTaiYuan ? bazi.getTaiYuan() : null;
             thaiNguyen = rawThaiNguyen ? translateGanZhi(rawThaiNguyen) : this._getThaiNguyenManual();
 
-            // Thân Cung from lunar-javascript
             const rawThanCung = bazi.getShenGong ? bazi.getShenGong() : null;
             thanCung = rawThanCung ? translateGanZhi(rawThanCung) : `${dayGanVN} ${ganzhi.zhiToVN(this.zhis[2])}`;
 
-            // Nhập vận (Manual Calculation for Accuracy)
+            // Nhập vận
             const dayun = require('./dayun');
-            // Recalculate direction manually to coincide with dayun.js logic
             const yearGan = this.gans[0];
-            const yearGanIdx = ganzhi.GANS.indexOf(yearGan); // Note: Assuming gans are Chinese? Or VN?
-            // Need to verify what 'this.gans' contains. Calculator.js line 45: bazi.getYearGan() returns Chinese char?
-            // lunar-javascript usually returns Chinese chars.
-            const isYangYear = (yearGanIdx >= 0) ? (yearGanIdx % 2 === 0) : true; // Default Yang if not found
+            const yearGanIdx = ganzhi.GANS.indexOf(yearGan);
+            const isYangYear = yearGanIdx >= 0 ? yearGanIdx % 2 === 0 : true;
 
-            // Re-calc direction
             let isForward;
             if (this.isFemale) {
                 isForward = !isYangYear;
             } else {
                 isForward = isYangYear;
             }
-            // Use manual start age
+
             const startAgeObj = dayun.calculateStartAge(solar, lunar, isForward);
 
-            // Convert to Date
-            const birthDate = new Date(solar.getYear(), solar.getMonth() - 1, solar.getDay());
-            // Add Start Age Span
-            // birthDate.setFullYear(birthDate.getFullYear() + startAgeObj.years);
-            // birthDate.setMonth(birthDate.getMonth() + startAgeObj.months);
-
-            // Calculate resulting Year and Month
             let targetYear = solar.getYear() + startAgeObj.years;
             let targetMonth = solar.getMonth() + startAgeObj.months;
 
@@ -333,25 +398,16 @@ class BaZiCalculator {
                 targetYear += 1;
             }
 
-            // Format: "Tháng M/YYYY"
             nhapVan = `Tháng ${targetMonth}/${targetYear}`;
-            // Also store basic Start Age for Dayun loop
-            // Dayun loop currently uses `i` integer.
-            // We need to pass precise age? No, loop uses integer years usually (Chinese age).
-            // But calculator needs start age for year mapping.
-            // For now, assume integer years for the main loop, but display precise time.
 
         } catch (e) {
-            console.error("Error calculating Nhap Van:", e); // Debug
-            // Fallback to manual calculations
+            console.error('Error calculating Nhap Van:', e);
             menhCung = `${dayGanVN} ${monthZhiVN}`;
             thaiNguyen = this._getThaiNguyenManual();
             thanCung = `${dayGanVN} ${ganzhi.zhiToVN(this.zhis[2])}`;
             nhapVan = 'Đang tính';
         }
 
-
-        // Calculate weak/strong (can_yeu)
         const isWeak = this.scores?.suc_manh?.la_nhuoc;
         const canYeu = isWeak === true ? 'Yếu' : isWeak === false ? 'Mạnh' : 'Trung bình';
 
@@ -363,7 +419,7 @@ class BaZiCalculator {
                 ngay_am_lich: `Năm ${lunar.getYear()} tháng ${lunar.getMonth()} ngày ${lunar.getDay()}`,
                 gio_sinh: String(this.hour),
                 gio_chi: ganzhi.zhiToVN(this.zhis[3]),
-                tiet_khi: lunar.getJieQi() || '',
+                tiet_khi: tietKhi,   // FIX 2: tiết khí hiện hành, không phải getJieQi()
                 menh_cung: menhCung,
                 thai_nguyen: thaiNguyen,
                 than_cung: thanCung,
@@ -383,9 +439,8 @@ class BaZiCalculator {
             isFemale: this.isFemale,
             solar,
             lunar,
-            bazi, // Store bazi object for later use
-            yun,  // Store yun for Dai Van calculations
-            // Shishen-specific lists
+            bazi,
+            yun,
             ganShens,
             zhiShens,
             zhiShen3,
@@ -393,9 +448,7 @@ class BaZiCalculator {
             nayin: this.pillars.map(p => p.nap_am),
             ge: ganzhi.getThapThan(dayGan, ganzhi.getZhiMainGan(this.zhis[1])),
             me: dayGan,
-            // Vòng Trường Sinh for each pillar
             pillarStages: this.zhis.map(zhi => ganzhi.getVongTrangSinh(this.gans[2], zhi)),
-            // Additional properties for parity
             weak: isWeak,
             strong: this.scores?.suc_manh?.diem_manh || 0,
             hour_unknown: false
@@ -403,8 +456,6 @@ class BaZiCalculator {
     }
 
     _getThaiNguyenManual() {
-        // Thai Nguyên manual calculation
-        // Thai Nguyên = Month Gan + 1 position, Month Zhi + 3 positions
         const monthGanIdx = ganzhi.GANS.indexOf(this.gans[1]);
         const monthZhiIdx = ganzhi.ZHIS.indexOf(this.zhis[1]);
         const thaiGanIdx = (monthGanIdx + 1) % 10;
@@ -413,7 +464,6 @@ class BaZiCalculator {
     }
 
     _getCanKhi() {
-        // Can Khí analysis
         const dayElement = ganzhi.ganToElement(this.gans[2]);
         const monthZhi = this.zhis[1];
         return ganzhi.getCanKhi(dayElement, monthZhi);
